@@ -141,10 +141,9 @@ def convert_vit_checkpoint(vit_name, pytorch_dump_folder_path):
     config = ViTConfig()
     base_model = False
     # dataset (ImageNet-21k only or also fine-tuned on ImageNet 2012), patch_size and image_size
+
     if vit_name[-5:] == "in21k":
         base_model = True
-        config.patch_size = int(vit_name[-12:-10])
-        config.image_size = int(vit_name[-9:-6])
     else:
         config.num_labels = 1000
         repo_id = "huggingface/label-files"
@@ -153,47 +152,28 @@ def convert_vit_checkpoint(vit_name, pytorch_dump_folder_path):
         id2label = {int(k): v for k, v in id2label.items()}
         config.id2label = id2label
         config.label2id = {v: k for k, v in id2label.items()}
-        config.patch_size = int(vit_name[-6:-4])
-        config.image_size = int(vit_name[-3:])
-    # size of the architecture
-    if "deit" in vit_name:
-        if vit_name[9:].startswith("tiny"):
-            config.hidden_size = 192
-            config.intermediate_size = 768
-            config.num_hidden_layers = 12
-            config.num_attention_heads = 3
-        elif vit_name[9:].startswith("small"):
-            config.hidden_size = 384
-            config.intermediate_size = 1536
-            config.num_hidden_layers = 12
-            config.num_attention_heads = 6
-        else:
-            pass
-    else:
-        if vit_name[4:].startswith("small"):
-            config.hidden_size = 768
-            config.intermediate_size = 2304
-            config.num_hidden_layers = 8
-            config.num_attention_heads = 8
-        elif vit_name[4:].startswith("base"):
-            pass
-        elif vit_name[4:].startswith("large"):
-            config.hidden_size = 1024
-            config.intermediate_size = 4096
-            config.num_hidden_layers = 24
-            config.num_attention_heads = 16
-        elif vit_name[4:].startswith("huge"):
-            config.hidden_size = 1280
-            config.intermediate_size = 5120
-            config.num_hidden_layers = 32
-            config.num_attention_heads = 16
 
     # load original model from timm
     timm_model = timm.create_model(vit_name, pretrained=True)
     timm_model.eval()
+    state_dict = timm_model.state_dict()
+
+    # grab the config.json to determine the image size used to train the model
+    repo_id = f"timm/{vit_name}"
+    print(f"Downloading model config from {repo_id}...")
+    local_config_path = hf_hub_download(repo_id=repo_id, filename="config.json")
+    with open(local_config_path, "r") as f:
+        timm_model_config = json.load(f)
+
+    # utilize state dict and model config to set ViT configuration parameters
+    config.image_size = timm_model_config["pretrained_cfg"]["input_size"][-1]
+    config.patch_size = state_dict["patch_embed.proj.weight"].shape[-1]
+    config.hidden_size = state_dict["cls_token"].shape[-1]
+    config.intermediate_size = state_dict["blocks.0.mlp.fc1.bias"].shape[-1]
+    config.num_hidden_layers = max([int(x.split(".")[1]) for x in state_dict.keys() if "block" in x]) + 1
+    config.num_attention_heads = len([x for x in state_dict.keys() if "attn.qkv.weight" in x])
 
     # load state_dict of original model, remove and rename some keys
-    state_dict = timm_model.state_dict()
     if base_model:
         remove_classification_head_(state_dict)
     rename_keys = create_rename_keys(config, base_model)
